@@ -1,9 +1,11 @@
 <?php
-/**
- * @package     Mautic
- * @copyright   2014 Mautic Contributors. All rights reserved.
+
+/*
+ * @copyright   2014 Mautic Contributors. All rights reserved
  * @author      Mautic
+ *
  * @link        http://mautic.org
+ *
  * @license     GNU/GPLv3 http://www.gnu.org/licenses/gpl-3.0.html
  */
 
@@ -12,24 +14,23 @@ namespace Mautic\CoreBundle\Templating\Helper;
 use Symfony\Component\Form\FormView;
 
 /**
- * Class FormHelper
- *
- * @package Mautic\CoreBundle\Templating\Helper
+ * Class FormHelper.
  */
 class FormHelper extends \Symfony\Bundle\FrameworkBundle\Templating\Helper\FormHelper
 {
-
     /**
-     * Render widget if it exists
+     * Render widget if it exists.
      *
-     * @param array|FormView $form
-     * @param                $key
+     * @param       $form
+     * @param       $key
+     * @param null  $template
+     * @param array $variables
      *
-     * @return string
+     * @return mixed|string
      */
-    public function widgetIfExists ($form, $key, $template = null)
+    public function widgetIfExists($form, $key, $template = null, $variables = [])
     {
-        $content = (isset($form[$key])) ? $this->widget($form[$key]) : '';
+        $content = (isset($form[$key])) ? $this->widget($form[$key], $variables) : '';
 
         if ($content && !empty($template)) {
             $content = str_replace('{content}', $content, $template);
@@ -39,16 +40,18 @@ class FormHelper extends \Symfony\Bundle\FrameworkBundle\Templating\Helper\FormH
     }
 
     /**
-     * Render row if it exists
+     * Render row if it exists.
      *
-     * @param array|FormView $form
-     * @param                $key
+     * @param       $form
+     * @param       $key
+     * @param null  $template
+     * @param array $variables
      *
-     * @return string
+     * @return mixed|string
      */
-    public function rowIfExists ($form, $key, $template = null)
+    public function rowIfExists($form, $key, $template = null, $variables = [])
     {
-        $content = (isset($form[$key])) ? $this->row($form[$key]) : '';
+        $content = (isset($form[$key])) ? $this->row($form[$key], $variables) : '';
 
         if ($content && !empty($template)) {
             $content = str_replace('{content}', $content, $template);
@@ -58,16 +61,18 @@ class FormHelper extends \Symfony\Bundle\FrameworkBundle\Templating\Helper\FormH
     }
 
     /**
-     * Render label if it exists
+     * Render label if it exists.
      *
-     * @param array|FormView $form
-     * @param                $key
+     * @param       $form
+     * @param       $key
+     * @param null  $template
+     * @param array $variables
      *
-     * @return string
+     * @return mixed|string
      */
-    public function labelIfExists ($form, $key, $template = null)
+    public function labelIfExists($form, $key, $template = null, $variables = [])
     {
-        $content = (isset($form[$key])) ? $this->label($form[$key]) : '';
+        $content = (isset($form[$key])) ? $this->label($form[$key], null, $variables) : '';
 
         if ($content && !empty($template)) {
             $content = str_replace('{content}', $content, $template);
@@ -77,19 +82,25 @@ class FormHelper extends \Symfony\Bundle\FrameworkBundle\Templating\Helper\FormH
     }
 
     /**
-     * Checks to see if the form and its children has an error
+     * Checks to see if the form and its children has an error.
      *
-     * @param $form
+     * @param FormView $form
+     * @param array    $exluding
      *
      * @return bool
      */
-    public function containsErrors (FormView $form) {
+    public function containsErrors(FormView $form, array $exluding = [])
+    {
         if (count($form->vars['errors'])) {
             return true;
         }
-        foreach ($form->children as $child) {
-            if (count($child->vars['errors'])) {
-               return true;
+        foreach ($form->children as $key => $child) {
+            if (in_array($key, $exluding)) {
+                continue;
+            }
+
+            if (isset($child->vars['errors']) && count($child->vars['errors'])) {
+                return true;
             }
 
             if (count($child->children)) {
@@ -99,6 +110,7 @@ class FormHelper extends \Symfony\Bundle\FrameworkBundle\Templating\Helper\FormH
                 }
             }
         }
+
         return false;
     }
 }

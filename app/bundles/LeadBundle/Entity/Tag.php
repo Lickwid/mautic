@@ -1,9 +1,11 @@
 <?php
-/**
- * @package     Mautic
- * @copyright   2015 Mautic Contributors. All rights reserved.
+
+/*
+ * @copyright   2015 Mautic Contributors. All rights reserved
  * @author      Mautic
+ *
  * @link        http://mautic.org
+ *
  * @license     GNU/GPLv3 http://www.gnu.org/licenses/gpl-3.0.html
  */
 
@@ -32,7 +34,8 @@ class Tag
     {
         $builder = new ClassMetadataBuilder($metadata);
         $builder->setTable('lead_tags')
-            ->setCustomRepositoryClass('Mautic\LeadBundle\Entity\TagRepository');
+            ->setCustomRepositoryClass('Mautic\LeadBundle\Entity\TagRepository')
+            ->addIndex(['tag'], 'lead_tag_search');
 
         $builder->addId();
         $builder->addField('tag', 'string');
@@ -45,9 +48,9 @@ class Tag
     {
         $metadata->setGroupPrefix('tag')
             ->addListProperties(
-                array(
-                    'tag'
-                )
+                [
+                    'tag',
+                ]
             )
             ->build();
     }

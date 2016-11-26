@@ -1,9 +1,11 @@
 <?php
-/**
- * @package     Mautic
- * @copyright   2014 Mautic Contributors. All rights reserved.
+
+/*
+ * @copyright   2014 Mautic Contributors. All rights reserved
  * @author      Mautic
+ *
  * @link        http://mautic.org
+ *
  * @license     GNU/GPLv3 http://www.gnu.org/licenses/gpl-3.0.html
  */
 
@@ -13,55 +15,61 @@ use Mautic\CoreBundle\Factory\MauticFactory;
 use Symfony\Bundle\FrameworkBundle\Console\Application;
 use Symfony\Component\Console\Input\ArgvInput;
 use Symfony\Component\Console\Output\NullOutput;
+use Symfony\Component\Filesystem\Filesystem;
 
 /**
- * Class CacheHelper
- *
- * @package Mautic\CoreBundle\Helper
+ * Class CacheHelper.
  */
 class CacheHelper
 {
-    private $factory;
+    protected $factory;
+
+    protected $cacheDir;
+
+    protected $env;
+
+    protected $configFile;
+
+    protected $containerFile;
 
     /**
      * @param MauticFactory $factory
      */
     public function __construct(MauticFactory $factory)
     {
-        $this->factory = $factory;
+        $this->factory       = $factory;
+        $this->cacheDir      = $factory->getSystemPath('cache', true);
+        $this->env           = $factory->getEnvironment();
+        $this->configFile    = $this->factory->getLocalConfigFile(false);
+        $this->containerFile = $this->factory->getKernel()->getContainerFile();
     }
 
     /**
-     * Clear the application cache and run the warmup routine for the current environment
-     *
-     * @param bool $noWarmup Skips the warmup routine
-     *
-     * @return void
+     * Clear the application cache and run the warmup routine for the current environment.
      */
-    public function clearCache($noWarmup = false)
+    public function clearCache()
     {
-        $this->clearSessionItems();
+        $memoryLimit = ini_get('memory_limit');
+        if ((int) substr($memoryLimit, 0, -1) < 128) {
+            ini_set('memory_limit', '128M');
+        }
 
-        ini_set('memory_limit', '128M');
+        $this->clearSessionItems();
+        $this->clearOpcaches();
 
         //attempt to squash command output
         ob_start();
 
-        $env  = $this->factory->getEnvironment();
-        $args = array('console', 'cache:clear', '--env=' . $env);
+        $args = ['console', 'cache:clear', '--env='.$this->env];
 
-        if ($env == 'prod') {
+        if ($this->env == 'prod') {
             $args[] = '--no-debug';
-        }
-
-        if ($noWarmup) {
-            $args[] = '--no-warmup';
         }
 
         $input       = new ArgvInput($args);
         $application = new Application($this->factory->getKernel());
         $application->setAutoExit(false);
-        $output      = new NullOutput();
+        $output = new NullOutput();
         $application->run($input, $output);
 
         if (ob_get_length() > 0) {
@@ -70,36 +78,72 @@ class CacheHelper
     }
 
     /**
-     * Deletes the cache folder
+     * Deletes the cache folder.
      */
     public function nukeCache()
     {
         $this->clearSessionItems();
 
-        $cacheDir = $this->factory->getSystemPath('cache', true);
+        $fs = new Filesystem();
+        $fs->remove($this->cacheDir);
 
-        $fs = new \Symfony\Component\Filesystem\Filesystem();
-        $fs->remove($cacheDir);
+        $this->clearOpcaches();
     }
 
     /**
-     * Delete's the file Symfony caches settings in
+     * Delete's the file Symfony caches settings in.
+     *
+     * @param bool $configSave
      */
-    public function clearCacheFile()
+    public function clearContainerFile($configSave = true)
     {
-        $env      = $this->factory->getEnvironment();
-        $debug    = ($this->factory->getDebugMode()) ? 'Debug' : '';
-        $cacheDir = $this->factory->getSystemPath('cache', true);
+        $this->clearSessionItems();
 
-        $cacheFile = "$cacheDir/app".ucfirst($env)."{$debug}ProjectContainer.php";
+        $containerFile = $this->factory->getKernel()->getContainerFile();
+        if (file_exists($containerFile)) {
+            unlink($containerFile);
+        }
 
-        if (file_exists($cacheFile)) {
-            unlink($cacheFile);
+        $this->clearOpcaches($configSave);
+    }
+
+    /**
+     * Clears the cache for translations.
+     *
+     * @param null $locale
+     */
+    public function clearTranslationCache($locale = null)
+    {
+        if ($locale) {
+            $localeCache = $this->cacheDir.'/translations/catalogue.'.$locale.'.php';
+            if (file_exists($localeCache)) {
+                unlink($localeCache);
+            }
+        } else {
+            $fs = new Filesystem();
+            $fs->remove($this->cacheDir.'/translations');
         }
     }
 
     /**
-     * Clear cache related session items
+     * Clears the cache for routing.
+     */
+    public function clearRoutingCache()
+    {
+        $unlink = [
+            $this->factory->getKernel()->getContainer()->getParameter('router.options.generator.cache_class'),
+            $this->factory->getKernel()->getContainer()->getParameter('router.options.matcher.cache_class'),
+        ];
+
+        foreach ($unlink as $file) {
+            if (file_exists($this->cacheDir.'/'.$file.'.php')) {
+                unlink($this->cacheDir.'/'.$file.'.php');
+            }
+        }
+    }
+
+    /**
+     * Clear cache related session items.
      */
     protected function clearSessionItems()
     {
@@ -107,5 +151,29 @@ class CacheHelper
         $session = $this->factory->getSession();
         $session->remove('mautic.menu.items');
         $session->remove('mautic.menu.icons');
+    }
+
+    /**
+     * Clear opcaches.
+     *
+     * @param bool|false $configSave
+     */
+    protected function clearOpcaches($configSave = false)
+    {
+        // Clear opcaches before rebuilding the cache to ensure latest file changes are used
+        if (function_exists('opcache_reset')) {
+            if ($configSave && function_exists('opcache_invalidate')) {
+                // Clear the cached config file
+                opcache_invalidate($this->configFile, true);
+                opcache_invalidate($this->containerFile, true);
+            } else {
+                // Clear the entire cache as anything could have been affected
+                opcache_reset();
+            }
+        }
+
+        if (function_exists('apc_clear_cache')) {
+            apc_clear_cache();
+        }
     }
 }

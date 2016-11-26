@@ -1,9 +1,10 @@
 <?php
 /**
- * @package     Mautic
- * @copyright   2014 Mautic Contributors. All rights reserved.
+ * @copyright   2014 Mautic Contributors. All rights reserved
  * @author      Mautic
+ *
  * @link        http://mautic.org
+ *
  * @license     GNU/GPLv3 http://www.gnu.org/licenses/gpl-3.0.html
  */
 
@@ -12,21 +13,25 @@
  * so if the version string is 1.0.0-beta2 then the tag must be 1.0.0-beta2
  */
 
+// List of critical migrations
+$criticalMigrations = [
+    '20160225000000',
+];
+
 $baseDir = __DIR__;
 
 // Check if the version is in a branch or tag
-$args            = getopt('b::', array('repackage'));
-$versionLocation = (isset($args['b'])) ? ' ' : ' tags/';
+$args              = getopt('b::', ['repackage']);
+$gitSourceLocation = (isset($args['b'])) ? ' ' : ' tags/';
 
 // We need the version number so get the app kernel
-require_once dirname(__DIR__) . '/vendor/autoload.php';
-require_once dirname(__DIR__) . '/app/AppKernel.php';
+require_once dirname(__DIR__).'/vendor/autoload.php';
+require_once dirname(__DIR__).'/app/AppKernel.php';
 
-if (!empty($args['b'])) {
-    $version = $args['b'];
-} else {
-    $version = AppKernel::MAJOR_VERSION.'.'.AppKernel::MINOR_VERSION.'.'.AppKernel::PATCH_VERSION.AppKernel::EXTRA_VERSION;
-}
+$appVersion = AppKernel::MAJOR_VERSION.'.'.AppKernel::MINOR_VERSION.'.'.AppKernel::PATCH_VERSION.AppKernel::EXTRA_VERSION;
+
+// Use branch if applicable otherwise a version tag
+$gitSource = (!empty($args['b'])) ? $args['b'] : $appVersion;
 
 if (!isset($args['repackage'])) {
     // Preparation - Remove previous packages
@@ -43,15 +48,36 @@ if (!isset($args['repackage'])) {
     ob_start();
     passthru('which git', $systemGit);
     $systemGit = trim(ob_get_clean());
-
     // Checkout the version tag into the packaging space
     chdir(dirname(__DIR__));
-    system($systemGit.' archive '.$version.' | tar -x -C '.__DIR__.'/packaging');
+    system($systemGit.' archive '.$gitSource.' | tar -x -C '.__DIR__.'/packaging', $result);
+
+    // Get a list of all files in this release
+    ob_start();
+    passthru($systemGit.' ls-tree -r -t --name-only '.$gitSource, $releaseFiles);
+    $releaseFiles = explode("\n", trim(ob_get_clean()));
+
+    if ($result !== 0) {
+        exit;
+    }
+
     chdir(__DIR__);
-    system('cd '.__DIR__.'/packaging && composer install --no-dev --no-scripts --optimize-autoloader && cd ..');
+    system('cd '.__DIR__.'/packaging && composer install --no-dev --no-scripts --optimize-autoloader && cd ..', $result);
+    if ($result !== 0) {
+        exit;
+    }
 
     // Generate the bootstrap.php.cache file
-    system(__DIR__.'/packaging/vendor/sensio/distribution-bundle/Sensio/Bundle/DistributionBundle/Resources/bin/build_bootstrap.php');
+    system(__DIR__.'/packaging/vendor/sensio/distribution-bundle/Resources/bin/build_bootstrap.php', $result);
+    if ($result !== 0) {
+        exit;
+    }
+
+    // Compile prod assets
+    system('cd '.__DIR__.'/packaging && php '.__DIR__.'/packaging/app/console mautic:assets:generate -e prod', $result);
+    if ($result !== 0) {
+        exit;
+    }
 
     // Common steps
     include_once __DIR__.'/processfiles.php';
@@ -62,19 +88,22 @@ if (!isset($args['repackage'])) {
     passthru($systemGit.' tag -l', $tags);
     $tags = explode("\n", trim(ob_get_clean()));
 
-    // Get the list of modified files from the initial tag
-    // TODO - Hardcode this to the 1.0.0 tag when we're there
-    ob_start();
-    passthru($systemGit.' diff tags/'.$tags[0].$versionLocation.$version.' --name-status', $fileDiff);
-    $fileDiff = explode("\n", trim(ob_get_clean()));
-
     // Only add deleted files to our list; new and modified files will be covered by the archive
-    $deletedFiles  = array();
-    $modifiedFiles = array();
+    $deletedFiles  = [];
+    $modifiedFiles = [
+        'deleted_files.txt'       => true,
+        'critical_migrations.txt' => true,
+        'upgrade.php'             => true,
+    ];
 
     // Build an array of paths which we won't ever distro, this is used for the update packages
-    $doNotPackage = array(
+    $doNotPackage = [
+        '.github/CONTRIBUTING.md',
+        '.github/ISSUE_TEMPLATE.md',
+        '.github/PULL_REQUEST_TEMPLATE.md',
         '.gitignore',
+        '.travis.yml',
+        '.php_cs',
         'app/phpunit.xml.dist',
         'build',
         'composer.json',
@@ -82,38 +111,53 @@ if (!isset($args['repackage'])) {
         'Gruntfile.js',
         'index_dev.php',
         'package.json',
-        'upgrade.php'
-    );
+        'upgrade.php',
+    ];
 
     // Create a flag to check if the vendors changed
     $vendorsChanged = false;
 
-    foreach ($fileDiff as $file) {
-        $filename       = substr($file, 2);
-        $folderPath     = explode('/', $filename);
-        $baseFolderName = $folderPath[0];
+    // Get a list of changed files since 1.0.0
+    foreach ($tags as $tag) {
+        ob_start();
+        passthru($systemGit.' diff tags/'.$tag.$gitSourceLocation.$gitSource.' --name-status', $fileDiff);
+        $fileDiff = explode("\n", trim(ob_get_clean()));
 
-        if (!$vendorsChanged && $filename == 'composer.lock') {
-            $vendorsChanged = true;
-        }
+        foreach ($fileDiff as $file) {
+            $filename       = substr($file, 2);
+            $folderPath     = explode('/', $filename);
+            $baseFolderName = $folderPath[0];
 
-        $doNotPackageFile   = in_array($filename, $doNotPackage);
-        $doNotPackageFolder = in_array($baseFolderName, $doNotPackage);
+            if (!$vendorsChanged && $filename == 'composer.lock') {
+                $vendorsChanged = true;
+            }
 
-        if ($doNotPackageFile || $doNotPackageFolder) {
-            continue;
-        }
+            $doNotPackageFile   = in_array($filename, $doNotPackage);
+            $doNotPackageFolder = in_array($baseFolderName, $doNotPackage);
 
-        if (substr($file, 0, 1) == 'D') {
-            $deletedFiles[] = $filename;
-        } else {
-            $modifiedFiles[$filename] = true;
+            if ($doNotPackageFile || $doNotPackageFolder) {
+                continue;
+            }
+
+            if (substr($file, 0, 1) == 'D') {
+                if (!in_array($filename, $releaseFiles)) {
+                    $deletedFiles[$filename] = true;
+                }
+            } elseif (in_array($filename, $releaseFiles)) {
+                $modifiedFiles[$filename] = true;
+            }
         }
     }
 
-    // Add our update files to the $modifiedFiles array so they get packaged
-    $modifiedFiles['deleted_files.txt'] = true;
-    $modifiedFiles['upgrade.php']       = true;
+    // Include assets just in case they weren't
+    $assetFiles = [
+        'media/css/app.css'       => true,
+        'media/css/libraries.css' => true,
+        'media/js/app.js'         => true,
+        'media/js/libraries.js'   => true,
+        'media/js/mautic-form.js' => true,
+    ];
+    $modifiedFiles = $modifiedFiles + $assetFiles;
 
     // Package the vendor folder if the lock changed
     if ($vendorsChanged) {
@@ -121,21 +165,25 @@ if (!isset($args['repackage'])) {
         $modifiedFiles['app/bootstrap.php.cache'] = true;
     }
 
-    $filePut = array_keys($modifiedFiles);
-    sort($filePut);
+    $modifiedFiles = array_keys($modifiedFiles);
+    sort($modifiedFiles);
+
+    $deletedFiles = array_keys($deletedFiles);
+    sort($deletedFiles);
 
     // Write our files arrays into text files
     file_put_contents(__DIR__.'/packaging/deleted_files.txt', json_encode($deletedFiles));
-    file_put_contents(__DIR__.'/packaging/modified_files.txt', implode("\n", $filePut));
+    file_put_contents(__DIR__.'/packaging/modified_files.txt', implode("\n", $modifiedFiles));
+    file_put_contents(__DIR__.'/packaging/critical_migrations.txt', json_encode($criticalMigrations));
 }
 
 // Post-processing - ZIP it up
-chdir(__DIR__ . '/packaging');
+chdir(__DIR__.'/packaging');
 
-system("rm -f ../packages/{$version}.zip ../packages/{$version}-update.zip");
+system("rm -f ../packages/{$appVersion}.zip ../packages/{$appVersion}-update.zip");
 
 echo "Packaging Mautic Full Installation\n";
-system('zip -r ../packages/' . $version . '.zip . -x@../excludefiles.txt > /dev/null');
+system('zip -r ../packages/'.$appVersion.'.zip . -x@../excludefiles.txt > /dev/null');
 
 echo "Packaging Mautic Update Package\n";
-system('zip -r ../packages/' . $version . '-update.zip -@ < modified_files.txt > /dev/null');
+system('zip -r ../packages/'.$appVersion.'-update.zip -@ < modified_files.txt > /dev/null');

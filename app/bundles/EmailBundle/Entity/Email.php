@@ -1,34 +1,45 @@
 <?php
-/**
- * @package     Mautic
- * @copyright   2014 Mautic Contributors. All rights reserved.
+
+/*
+ * @copyright   2014 Mautic Contributors. All rights reserved
  * @author      Mautic
+ *
  * @link        http://mautic.org
+ *
  * @license     GNU/GPLv3 http://www.gnu.org/licenses/gpl-3.0.html
  */
 
 namespace Mautic\EmailBundle\Entity;
 
 use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\ORM\Events;
 use Doctrine\ORM\Mapping as ORM;
 use Mautic\ApiBundle\Serializer\Driver\ApiMetadataDriver;
-use Mautic\CoreBundle\Doctrine\Mapping\ClassMetadataBuilder;
 use Mautic\AssetBundle\Entity\Asset;
+use Mautic\CoreBundle\Doctrine\Mapping\ClassMetadataBuilder;
+use Mautic\CoreBundle\Entity\DynamicContentEntityTrait;
 use Mautic\CoreBundle\Entity\FormEntity;
+use Mautic\CoreBundle\Entity\TranslationEntityInterface;
+use Mautic\CoreBundle\Entity\TranslationEntityTrait;
+use Mautic\CoreBundle\Entity\VariantEntityInterface;
+use Mautic\CoreBundle\Entity\VariantEntityTrait;
 use Mautic\CoreBundle\Helper\EmojiHelper;
 use Mautic\FormBundle\Entity\Form;
 use Mautic\LeadBundle\Entity\LeadList;
 use Mautic\LeadBundle\Form\Validator\Constraints\LeadListAccess;
+use Symfony\Component\Validator\Constraints\Callback;
 use Symfony\Component\Validator\Constraints\NotBlank;
+use Symfony\Component\Validator\Context\ExecutionContextInterface;
 use Symfony\Component\Validator\Mapping\ClassMetadata;
 
 /**
- * Class Email
- *
- * @package Mautic\EmailBundle\Entity
+ * Class Email.
  */
-class Email extends FormEntity
+class Email extends FormEntity implements VariantEntityInterface, TranslationEntityInterface
 {
+    use VariantEntityTrait;
+    use TranslationEntityTrait;
+    use DynamicContentEntityTrait;
 
     /**
      * @var int
@@ -76,14 +87,9 @@ class Email extends FormEntity
     private $template;
 
     /**
-     * @var string
-     */
-    private $language = 'en';
-
-    /**
      * @var array
      */
-    private $content = array();
+    private $content = [];
 
     /**
      * @var string
@@ -141,26 +147,6 @@ class Email extends FormEntity
     private $stats;
 
     /**
-     * @var Email
-     **/
-    private $variantParent = null;
-
-    /**
-     * @var ArrayCollection
-     **/
-    private $variantChildren;
-
-    /**
-     * @var array
-     */
-    private $variantSettings = array();
-
-    /**
-     * @var \DateTime
-     */
-    private $variantStartDate;
-
-    /**
      * @var int
      */
     private $variantSentCount = 0;
@@ -181,7 +167,7 @@ class Email extends FormEntity
     private $assetAttachments;
 
     /**
-     * Used to identify the page for the builder
+     * Used to identify the page for the builder.
      *
      * @var
      */
@@ -189,12 +175,25 @@ class Email extends FormEntity
 
     public function __clone()
     {
-        $this->id = null;
+        $this->id               = null;
+        $this->stats            = new ArrayCollection();
+        $this->sentCount        = 0;
+        $this->readCount        = 0;
+        $this->revision         = 0;
+        $this->variantSentCount = 0;
+        $this->variantStartDate = null;
+        $this->emailType        = null;
+        $this->sessionId        = 'new_'.hash('sha1', uniqid(mt_rand()));
+        $this->clearTranslations();
+        $this->clearVariants();
 
         parent::__clone();
     }
 
-    public function __construct ()
+    /**
+     * Email constructor.
+     */
+    public function __construct()
     {
         $this->lists            = new ArrayCollection();
         $this->stats            = new ArrayCollection();
@@ -203,7 +202,7 @@ class Email extends FormEntity
     }
 
     /**
-     *
+     * Clear stats.
      */
     public function clearStats()
     {
@@ -211,26 +210,18 @@ class Email extends FormEntity
     }
 
     /**
-     *
-     */
-    public function clearVariants()
-    {
-        $this->variantChildren = new ArrayCollection();
-        $this->variantParent   = null;
-    }
-
-    /**
      * @param ORM\ClassMetadata $metadata
      */
-    public static function loadMetadata (ORM\ClassMetadata $metadata)
+    public static function loadMetadata(ORM\ClassMetadata $metadata)
     {
         $builder = new ClassMetadataBuilder($metadata);
 
         $builder->setTable('emails')
-            ->setCustomRepositoryClass('Mautic\EmailBundle\Entity\EmailRepository');
+            ->setCustomRepositoryClass('Mautic\EmailBundle\Entity\EmailRepository')
+            ->addLifecycleEvent('cleanUrlsInContent', Events::preUpdate)
+            ->addLifecycleEvent('cleanUrlsInContent', Events::prePersist);
 
         $builder->addIdColumns();
-
         $builder->createField('subject', 'text')
             ->nullable()
             ->build();
@@ -257,10 +248,6 @@ class Email extends FormEntity
 
         $builder->createField('template', 'string')
             ->nullable()
-            ->build();
-
-        $builder->createField('language', 'string')
-            ->columnName('lang')
             ->build();
 
         $builder->createField('content', 'array')
@@ -311,26 +298,9 @@ class Email extends FormEntity
             ->fetchExtraLazy()
             ->build();
 
-        $builder->createManyToOne('variantParent', 'Email')
-            ->inversedBy('variantChildren')
-            ->addJoinColumn('variant_parent_id', 'id')
-            ->build();
-
-        $builder->createOneToMany('variantChildren', 'Email')
-            ->setIndexBy('id')
-            ->mappedBy('variantParent')
-            ->fetchLazy()
-            ->build();
-
-        $builder->createField('variantSettings', 'array')
-            ->columnName('variant_settings')
-            ->nullable()
-            ->build();
-
-        $builder->createField('variantStartDate', 'datetime')
-            ->columnName('variant_start_date')
-            ->nullable()
-            ->build();
+        self::addTranslationMetadata($builder, self::class);
+        self::addVariantMetadata($builder, self::class);
+        self::addDynamicContentMetadata($builder);
 
         $builder->createField('variantSentCount', 'integer')
             ->columnName('variant_sent_count')
@@ -355,81 +325,94 @@ class Email extends FormEntity
     /**
      * @param ClassMetadata $metadata
      */
-    public static function loadValidatorMetadata (ClassMetadata $metadata)
+    public static function loadValidatorMetadata(ClassMetadata $metadata)
     {
         $metadata->addPropertyConstraint(
             'name',
             new NotBlank(
-                array(
+                [
                     'message' => 'mautic.core.name.required',
-                    'groups'  => array('General')
-                )
+                ]
             )
         );
 
         $metadata->addPropertyConstraint(
             'fromAddress',
             new \Symfony\Component\Validator\Constraints\Email(
-                array(
+                [
                     'message' => 'mautic.core.email.required',
-                    'groups'  => array('General')
-                )
+                ]
             )
         );
 
         $metadata->addPropertyConstraint(
             'replyToAddress',
             new \Symfony\Component\Validator\Constraints\Email(
-                array(
+                [
                     'message' => 'mautic.core.email.required',
-                    'groups'  => array('General')
-                )
+                ]
             )
         );
 
         $metadata->addPropertyConstraint(
             'bccAddress',
             new \Symfony\Component\Validator\Constraints\Email(
-                array(
+                [
                     'message' => 'mautic.core.email.required',
-                    'groups'  => array('General')
-                )
+                ]
             )
         );
 
-        $metadata->addPropertyConstraint(
-            'lists',
-            new LeadListAccess(
-                array(
-                    'message' => 'mautic.lead.lists.required',
-                    'groups'  => array('List')
-                )
-            )
-        );
+        $metadata->addConstraint(new Callback([
+            'callback' => function (Email $email, ExecutionContextInterface $context) {
+                $type = $email->getEmailType();
+                $translationParent = $email->getTranslationParent();
 
-        $metadata->addPropertyConstraint(
-            'lists',
-            new NotBlank(
-                array(
-                    'message' => 'mautic.lead.lists.required',
-                    'groups'  => array('List')
-                )
-            )
-        );
+                if ($type == 'list' && null == $translationParent) {
+                    $validator = $context->getValidator();
+                    $violations = $validator->validate(
+                        $email->getLists(),
+                        [
+                            new LeadListAccess(),
+                            new NotBlank(
+                                [
+                                    'message' => 'mautic.lead.lists.required',
+                                ]
+                            ),
+                        ]
+                    );
+                    if (count($violations) > 0) {
+                        foreach ($violations as $violation) {
+                            $context->buildViolation($violation->getMessage())
+                                ->atPath('lists')
+                                ->addViolation();
+                        }
+                    }
+                }
+
+                if ($email->isVariant()) {
+                    // Get a summation of weights
+                    $parent = $email->getVariantParent();
+                    $children = $parent ? $parent->getVariantChildren() : $email->getVariantChildren();
+
+                    $total = 0;
+                    foreach ($children as $child) {
+                        $settings = $child->getVariantSettings();
+                        $total += (int) $settings['weight'];
+                    }
+
+                    if ($total > 100) {
+                        $context->buildViolation('mautic.core.variant_weights_invalid')
+                            ->atPath('variantSettings[weight]')
+                            ->addViolation();
+                    }
+                }
+            },
+        ]));
     }
 
     /**
-     * @param \Symfony\Component\Form\Form $form
-     *
-     * @return array
-     */
-    public static function determineValidationGroups(\Symfony\Component\Form\Form $form)
-    {
-        return ($form->getData()->getEmailType() == 'list') ? array('General', 'List') : array('General');
-    }
-
-    /**
-     * Prepares the metadata for API usage
+     * Prepares the metadata for API usage.
      *
      * @param $metadata
      */
@@ -437,17 +420,17 @@ class Email extends FormEntity
     {
         $metadata->setGroupPrefix('email')
             ->addListProperties(
-                array(
+                [
                     'id',
                     'name',
                     'subject',
                     'language',
                     'category',
 
-                )
+                ]
             )
             ->addProperties(
-                array(
+                [
                     'fromAddress',
                     'fromName',
                     'replyToAddress',
@@ -462,11 +445,10 @@ class Email extends FormEntity
                     'variantSentCount',
                     'variantReadCount',
                     'variantParent',
-                    'variantChildren'
-                )
+                    'variantChildren',
+                    'dynamicContent',
+                ]
             )
-            ->setMaxDepth(1, 'variantParent')
-            ->setMaxDepth(1, 'variantChildren')
             ->build();
     }
 
@@ -474,16 +456,16 @@ class Email extends FormEntity
      * @param $prop
      * @param $val
      */
-    protected function isChanged ($prop, $val)
+    protected function isChanged($prop, $val)
     {
-        $getter  = "get" . ucfirst($prop);
+        $getter  = 'get'.ucfirst($prop);
         $current = $this->$getter();
 
-        if ($prop == 'variantParent' || $prop == 'category' || $prop == 'list') {
+        if ($prop == 'variantParent' || $prop == 'translationParent' || $prop == 'category' || $prop == 'list') {
             $currentId = ($current) ? $current->getId() : '';
             $newId     = ($val) ? $val->getId() : null;
             if ($currentId != $newId) {
-                $this->changes[$prop] = array($currentId, $newId);
+                $this->changes[$prop] = [$currentId, $newId];
             }
         } else {
             parent::isChanged($prop, $val);
@@ -531,11 +513,11 @@ class Email extends FormEntity
     }
 
     /**
-     * Get id
+     * Get id.
      *
-     * @return integer
+     * @return int
      */
-    public function getId ()
+    public function getId()
     {
         return $this->id;
     }
@@ -543,7 +525,7 @@ class Email extends FormEntity
     /**
      * @return mixed
      */
-    public function getCategory ()
+    public function getCategory()
     {
         return $this->category;
     }
@@ -553,7 +535,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setCategory ($category)
+    public function setCategory($category)
     {
         $this->isChanged('category', $category);
         $this->category = $category;
@@ -564,7 +546,7 @@ class Email extends FormEntity
     /**
      * @return array
      */
-    public function getContent ()
+    public function getContent()
     {
         return $this->content;
     }
@@ -574,7 +556,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setContent ($content)
+    public function setContent($content)
     {
         // Ensure safe emoji
         $content = EmojiHelper::toShort($content);
@@ -588,26 +570,9 @@ class Email extends FormEntity
     /**
      * @return mixed
      */
-    public function getReadCount ($includeVariants = false)
+    public function getReadCount($includeVariants = false)
     {
-        $count = $this->readCount;
-
-        if ($includeVariants && $this->isVariant()) {
-            $parent = $this->getVariantParent();
-            if ($parent) {
-                $count   += $parent->getReadCount();
-                $children = $parent->getVariantChildren();
-            } else {
-                $children = $this->getVariantChildren();
-            }
-            foreach ($children as $child) {
-                if ($child->getId() !== $this->id) {
-                    $count += $child->getReadCount();
-                }
-            }
-        }
-
-        return $count;
+        return ($includeVariants) ? $this->getAccumulativeVariantCount('getReadCount') : $this->readCount;
     }
 
     /**
@@ -615,7 +580,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setReadCount ($readCount)
+    public function setReadCount($readCount)
     {
         $this->readCount = $readCount;
 
@@ -625,28 +590,7 @@ class Email extends FormEntity
     /**
      * @return mixed
      */
-    public function getLanguage ()
-    {
-        return $this->language;
-    }
-
-    /**
-     * @param $language
-     *
-     * @return $this
-     */
-    public function setLanguage ($language)
-    {
-        $this->isChanged('language', $language);
-        $this->language = $language;
-
-        return $this;
-    }
-
-    /**
-     * @return mixed
-     */
-    public function getRevision ()
+    public function getRevision()
     {
         return $this->revision;
     }
@@ -656,7 +600,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setRevision ($revision)
+    public function setRevision($revision)
     {
         $this->revision = $revision;
 
@@ -666,7 +610,7 @@ class Email extends FormEntity
     /**
      * @return mixed
      */
-    public function getSessionId ()
+    public function getSessionId()
     {
         return $this->sessionId;
     }
@@ -676,7 +620,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setSessionId ($sessionId)
+    public function setSessionId($sessionId)
     {
         $this->sessionId = $sessionId;
 
@@ -686,7 +630,7 @@ class Email extends FormEntity
     /**
      * @return mixed
      */
-    public function getSubject ()
+    public function getSubject()
     {
         return $this->subject;
     }
@@ -696,7 +640,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setSubject ($subject)
+    public function setSubject($subject)
     {
         $this->isChanged('subject', $subject);
         $this->subject = $subject;
@@ -787,7 +731,7 @@ class Email extends FormEntity
     /**
      * @return mixed
      */
-    public function getTemplate ()
+    public function getTemplate()
     {
         return $this->template;
     }
@@ -797,7 +741,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setTemplate ($template)
+    public function setTemplate($template)
     {
         $this->isChanged('template', $template);
         $this->template = $template;
@@ -806,114 +750,9 @@ class Email extends FormEntity
     }
 
     /**
-     * Add variantChildren
-     *
-     * @param \Mautic\EmailBundle\Entity\Email $variantChildren
-     *
-     * @return Email
-     */
-    public function addVariantChild (\Mautic\EmailBundle\Entity\Email $variantChildren)
-    {
-        $this->variantChildren[] = $variantChildren;
-
-        return $this;
-    }
-
-    /**
-     * Remove variantChildren
-     *
-     * @param \Mautic\EmailBundle\Entity\Email $variantChildren
-     */
-    public function removeVariantChild (\Mautic\EmailBundle\Entity\Email $variantChildren)
-    {
-        $this->variantChildren->removeElement($variantChildren);
-    }
-
-    /**
-     * Get variantChildren
-     *
-     * @return \Doctrine\Common\Collections\Collection
-     */
-    public function getVariantChildren ()
-    {
-        return $this->variantChildren;
-    }
-
-    /**
-     * Set variantParent
-     *
-     * @param \Mautic\EmailBundle\Entity\Email $variantParent
-     *
-     * @return Email
-     */
-    public function setVariantParent (\Mautic\EmailBundle\Entity\Email $variantParent = null)
-    {
-        $this->isChanged('variantParent', $variantParent);
-        $this->variantParent = $variantParent;
-
-        return $this;
-    }
-
-    /**
-     * Get variantParent
-     *
-     * @return \Mautic\EmailBundle\Entity\Email
-     */
-    public function getVariantParent ()
-    {
-        return $this->variantParent;
-    }
-
-    /**
-     * Set variantSettings
-     *
-     * @param array $variantSettings
-     *
-     * @return Email
-     */
-    public function setVariantSettings ($variantSettings)
-    {
-        $this->isChanged('variantSettings', $variantSettings);
-        $this->variantSettings = $variantSettings;
-
-        return $this;
-    }
-
-    /**
-     * Get variantSettings
-     *
-     * @return array
-     */
-    public function getVariantSettings ()
-    {
-        return $this->variantSettings;
-    }
-
-    /**
      * @return mixed
      */
-    public function getVariantStartDate ()
-    {
-        return $this->variantStartDate;
-    }
-
-    /**
-     * @param $variantStartDate
-     *
-     * @return $this
-     */
-    public function setVariantStartDate ($variantStartDate)
-    {
-        $this->isChanged('variantStartDate', $variantStartDate);
-        $this->variantStartDate = $variantStartDate;
-
-        return $this;
-    }
-
-    /**
-     * @return mixed
-     */
-    public function getPublishDown ()
+    public function getPublishDown()
     {
         return $this->publishDown;
     }
@@ -923,7 +762,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setPublishDown ($publishDown)
+    public function setPublishDown($publishDown)
     {
         $this->isChanged('publishDown', $publishDown);
         $this->publishDown = $publishDown;
@@ -934,7 +773,7 @@ class Email extends FormEntity
     /**
      * @return mixed
      */
-    public function getPublishUp ()
+    public function getPublishUp()
     {
         return $this->publishUp;
     }
@@ -944,7 +783,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setPublishUp ($publishUp)
+    public function setPublishUp($publishUp)
     {
         $this->isChanged('publishUp', $publishUp);
         $this->publishUp = $publishUp;
@@ -957,26 +796,9 @@ class Email extends FormEntity
      *
      * @return mixed
      */
-    public function getSentCount ($includeVariants = false)
+    public function getSentCount($includeVariants = false)
     {
-        $count = $this->sentCount;
-
-        if ($includeVariants && $this->isVariant()) {
-            $parent = $this->getVariantParent();
-            if ($parent) {
-                $count   += $parent->getSentCount();
-                $children = $parent->getVariantChildren();
-            } else {
-                $children = $this->getVariantChildren();
-            }
-            foreach ($children as $child) {
-                if ($child->getId() !== $this->id) {
-                    $count += $child->getSentCount();
-                }
-            }
-        }
-
-        return $count;
+        return ($includeVariants) ? $this->getAccumulativeVariantCount('getSentCount') : $this->sentCount;
     }
 
     /**
@@ -984,7 +806,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setSentCount ($sentCount)
+    public function setSentCount($sentCount)
     {
         $this->sentCount = $sentCount;
 
@@ -994,9 +816,9 @@ class Email extends FormEntity
     /**
      * @return mixed
      */
-    public function getVariantSentCount ()
+    public function getVariantSentCount($includeVariants = false)
     {
-        return $this->variantSentCount;
+        return ($includeVariants) ? $this->getAccumulativeVariantCount('getVariantSentCount') : $this->variantSentCount;
     }
 
     /**
@@ -1004,7 +826,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setVariantSentCount ($variantSentCount)
+    public function setVariantSentCount($variantSentCount)
     {
         $this->variantSentCount = $variantSentCount;
 
@@ -1014,15 +836,16 @@ class Email extends FormEntity
     /**
      * @return mixed
      */
-    public function getLists ()
+    public function getLists()
     {
         return $this->lists;
     }
 
     /**
-     * Add list
+     * Add list.
      *
      * @param LeadList $list
+     *
      * @return Email
      */
     public function addList(LeadList $list)
@@ -1033,7 +856,19 @@ class Email extends FormEntity
     }
 
     /**
-     * Remove list
+     * Set the lists for this translation.
+     *
+     * @param array $lists
+     */
+    public function setLists(array $lists = [])
+    {
+        $this->lists = $lists;
+
+        return $this;
+    }
+
+    /**
+     * Remove list.
      *
      * @param LeadList $list
      */
@@ -1045,7 +880,7 @@ class Email extends FormEntity
     /**
      * @return mixed
      */
-    public function getPlainText ()
+    public function getPlainText()
     {
         return $this->plainText;
     }
@@ -1055,7 +890,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setPlainText ($plainText)
+    public function setPlainText($plainText)
     {
         $this->plainText = $plainText;
 
@@ -1063,33 +898,9 @@ class Email extends FormEntity
     }
 
     /**
-     * Increase sent counts by one
-     */
-    public function upSentCounts ()
-    {
-        $this->sentCount++;
-        if (!empty($this->variantStartDate)) {
-            $this->variantSentCount++;
-        }
-    }
-
-    /**
-     * Decrease sent counts by one
-     */
-    public function downSentCounts ()
-    {
-        if ($this->sentCount) {
-            $this->sentCount--;
-            if (!empty($this->variantStartDate) && $this->variantSentCount) {
-                $this->variantSentCount--;
-            }
-        }
-    }
-
-    /**
      * @return mixed
      */
-    public function getVariantReadCount ()
+    public function getVariantReadCount()
     {
         return $this->variantReadCount;
     }
@@ -1099,7 +910,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setVariantReadCount ($variantReadCount)
+    public function setVariantReadCount($variantReadCount)
     {
         $this->variantReadCount = $variantReadCount;
 
@@ -1107,23 +918,9 @@ class Email extends FormEntity
     }
 
     /**
-     * @param bool $isChild True to return if the email is a variant of a parent
-     *
-     * @return bool
-     */
-    public function isVariant($isChild = false)
-    {
-        if ($isChild) {
-            return ($this->variantParent === null) ? false : true;
-        } else {
-            return (!empty($this->variantParent) || count($this->variantChildren)) ? true : false;
-        }
-    }
-
-    /**
      * @return mixed
      */
-    public function getStats ()
+    public function getStats()
     {
         return $this->stats;
     }
@@ -1131,7 +928,7 @@ class Email extends FormEntity
     /**
      * @return mixed
      */
-    public function getCustomHtml ()
+    public function getCustomHtml()
     {
         return $this->customHtml;
     }
@@ -1141,7 +938,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setCustomHtml ($customHtml)
+    public function setCustomHtml($customHtml)
     {
         $this->customHtml = $customHtml;
 
@@ -1151,7 +948,7 @@ class Email extends FormEntity
     /**
      * @return mixed
      */
-    public function getUnsubscribeForm ()
+    public function getUnsubscribeForm()
     {
         return $this->unsubscribeForm;
     }
@@ -1161,7 +958,7 @@ class Email extends FormEntity
      *
      * @return $this
      */
-    public function setUnsubscribeForm (Form $unsubscribeForm)
+    public function setUnsubscribeForm(Form $unsubscribeForm = null)
     {
         $this->unsubscribeForm = $unsubscribeForm;
 
@@ -1188,11 +985,10 @@ class Email extends FormEntity
         return $this;
     }
 
-
     /**
-     * Add asset
+     * Add asset.
      *
-     * @param Asset  $asset
+     * @param Asset $asset
      *
      * @return Email
      */
@@ -1204,7 +1000,7 @@ class Email extends FormEntity
     }
 
     /**
-     * Remove asset
+     * Remove asset.
      *
      * @param Asset $asset
      */
@@ -1214,7 +1010,7 @@ class Email extends FormEntity
     }
 
     /**
-     * Get assetAttachments
+     * Get assetAttachments.
      *
      * @return \Doctrine\Common\Collections\Collection
      */
@@ -1223,4 +1019,33 @@ class Email extends FormEntity
         return $this->assetAttachments;
     }
 
+    /**
+     * Lifecycle callback to clean URLs in the content.
+     */
+    public function cleanUrlsInContent()
+    {
+        $this->decodeAmpersands($this->plainText);
+        $this->decodeAmpersands($this->customHtml);
+    }
+
+    /**
+     * Check all links in content and decode &amp;
+     * This even works with double encoded ampersands.
+     *
+     * @param $content
+     */
+    private function decodeAmpersands(&$content)
+    {
+        if (preg_match_all('/((https?|ftps?):\/\/)([a-zA-Z0-9-\.{}]*[a-zA-Z0-9=}]*)(\??)([^\s\"\]]+)?/i', $content, $matches)) {
+            foreach ($matches[0] as $url) {
+                $newUrl = $url;
+
+                while (strpos($newUrl, '&amp;') !== false) {
+                    $newUrl = str_replace('&amp;', '&', $newUrl);
+                }
+
+                $content = str_replace($url, $newUrl, $content);
+            }
+        }
+    }
 }
